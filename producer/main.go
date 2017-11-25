@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"strconv"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 )
 
 const (
-	consumerTimeout = 600 * time.Millisecond
+	consumerTimeout = 500 * time.Millisecond
 )
 
 func main() {
@@ -37,12 +38,12 @@ func main() {
 	var routingKey, payload string
 	for {
 		payload = strconv.Itoa(counter)
-		routingKey = hash(counter)
+		routingKey = common.Hash(counter)
 
+		fmt.Printf(" [x] Sending %v with route %v\n", payload, routingKey)
 		err = common.Publish(ch, routingKey, payload)
 		failOnError(err, "Failed to publish a message")
 
-		log.Printf(" [x] Sent %v with route %v", payload, routingKey)
 		time.Sleep(500 * time.Millisecond)
 
 		counter++
@@ -50,7 +51,7 @@ func main() {
 			break
 		}
 	}
-	log.Println("done.")
+	fmt.Println("done.")
 }
 
 func failOnError(err error, msg string) {
@@ -58,10 +59,6 @@ func failOnError(err error, msg string) {
 		log.Fatalf("%s: %s", msg, err)
 		panic(fmt.Sprintf("%s: %s", msg, err))
 	}
-}
-
-func hash(input int) string {
-	return string(byte(input%26 + 97))
 }
 
 func startRegistry(ch *amqp.Channel) {
@@ -77,53 +74,31 @@ func startRegistry(ch *amqp.Channel) {
 
 	pool := make(map[string]int64, 1)
 	for d := range msgs {
-		confChange := false
 		t := time.Now().UnixNano()
 		c := string(d.Body)
+		change := false
 
 		// check in and refresh
 		if _, ok := pool[c]; !ok {
-			log.Println("adding consumer to pool:", c)
-			confChange = true
+			fmt.Println("adding consumer to pool:", c)
+			change = true
 		}
 		pool[c] = t
 
 		// TODO: differrent goroutine
+
 		// check out
 		for k, v := range pool {
 			if time.Since(time.Unix(0, v)) > consumerTimeout {
-				log.Println("removing consumer from pool:", k)
-				confChange = true
+				fmt.Println("removing consumer from pool:", k)
 				delete(pool, k)
+				change = true
 			}
 		}
 
-		// balance bindings
-		if confChange {
-			n := len(pool)
-			l := len(common.RouteKeys)
-			chunks := l / n
-			chunki := 0
-			for k, _ := range pool {
-				//log.Println("binding", chunki*chunks, "-", (chunki+1)*chunks, "to", k)
-				for i := chunki * chunks; i < (chunki+1)*chunks && i < l; i++ {
-					r := string(common.RouteKeys[i])
-					err := common.BindQueueTopic(ch, k, r)
-					failOnError(err, "Failed to bind queue")
-					//log.Println("binding", k, "to", r)
-
-					// unbind
-					for o, _ := range pool {
-						if o == k {
-							continue
-						}
-						//log.Println("unbinding", o, "from", r)
-						err = common.UnbindQueueTopic(ch, o, r)
-						failOnError(err, "Failed to unbind queue")
-					}
-				}
-				chunki++
-			}
+		if change {
+			balanceBindings(ch, pool)
+			failOnError(err, "Failed to balance bindings")
 		}
 	}
 }
@@ -134,4 +109,36 @@ func secureRandom(n int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(bytes), nil
+}
+
+func balanceBindings(ch *amqp.Channel, pool map[string]int64) error {
+	n := len(pool)
+	l := len(common.RouteKeys)
+	chunks := int(math.Ceil(float64(l) / float64(n)))
+	chunki := 0
+	for k := range pool {
+		fmt.Println(chunks, "size, binding", chunki*chunks, "-", (chunki+1)*chunks, "to", k)
+		for i := chunki * chunks; i < (chunki+1)*chunks && i < l; i++ {
+			r := string(common.RouteKeys[i])
+			err := common.BindQueueTopic(ch, k, r)
+			if err != nil {
+				return err
+			}
+			fmt.Println("binding", k, "to", r)
+
+			// unbind
+			for o := range pool {
+				if o == k {
+					continue
+				}
+				//fmt.Println("unbinding", o, "from", r)
+				err = common.UnbindQueueTopic(ch, o, r)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		chunki++
+	}
+	return nil
 }

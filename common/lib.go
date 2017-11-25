@@ -19,7 +19,12 @@ const (
 	registerTopic = "register"
 )
 
-var RouteKeys string = "abcdefghijklmnopqrstuvwxyz"
+var RouteKeys string = "abcdefgh" //ijklmnopqrstuvwxyz"
+
+func Hash(input int) string {
+	//return string(byte(input%26 + 97))
+	return string(byte(input%8 + 97))
+}
 
 func ConnectionString() string {
 	return fmt.Sprintf("%s://%s:%s@%s:%d/", scheme, username, password, hostname, port)
