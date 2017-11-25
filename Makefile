@@ -7,20 +7,20 @@ default: all
 all: build
 
 run: build
-	echo "starting consumer 1"
-	./consumer/consumer -tag c1 &
-	echo "starting producer"
-	./producer/producer &
-	sleep 5
-	echo "starting consumer 2"
-	./consumer/consumer -tag c2 &
-	sleep 5
-	echo "starting consumer 3"
-	./consumer/consumer -tag c3 &
-	sleep 5
-	echo "shutting down example"
-	killall producer
-	killall consumer
+	@echo " -- starting consumer 1"
+	@./consumer/consumer -tag c1 &
+	@echo " -- starting producer"
+	@./producer/producer &
+	@sleep 3
+	@echo " -- starting consumer 2"
+	@./consumer/consumer -tag c2 &
+	@sleep 3
+	@echo " -- starting consumer 3"
+	@./consumer/consumer -tag c3 &
+	@sleep 3
+	@echo " -- shutting down example"
+	@killall producer
+	@killall consumer
 
 build: producer consumer
 

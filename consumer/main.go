@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	heartbeatFrequency = 500 * time.Millisecond
+	heartbeatFrequency = 200 * time.Millisecond
 )
 
 var tag string
@@ -53,7 +53,7 @@ func main() {
 	// receive
 	go func() {
 		for d := range msgs {
-			log.Printf("received: %s", d.Body)
+			log.Printf("%s received: %s", tag, d.Body)
 		}
 	}()
 

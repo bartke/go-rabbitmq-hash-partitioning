@@ -12,6 +12,10 @@ import (
 	"github.com/streadway/amqp"
 )
 
+const (
+	consumerTimeout = 600 * time.Millisecond
+)
+
 func main() {
 	conn, err := amqp.Dial(common.ConnectionString())
 	failOnError(err, "Failed to connect to RabbitMQ")
@@ -71,11 +75,57 @@ func startRegistry(ch *amqp.Channel) {
 	msgs, err := common.Consume(ch, q, "mgnt")
 	failOnError(err, "Failed to register a consumer")
 
-	go func() {
-		for d := range msgs {
-			log.Printf("heartbeat: %s", d.Body)
+	pool := make(map[string]int64, 1)
+	for d := range msgs {
+		confChange := false
+		t := time.Now().UnixNano()
+		c := string(d.Body)
+
+		// check in and refresh
+		if _, ok := pool[c]; !ok {
+			log.Println("adding consumer to pool:", c)
+			confChange = true
 		}
-	}()
+		pool[c] = t
+
+		// TODO: differrent goroutine
+		// check out
+		for k, v := range pool {
+			if time.Since(time.Unix(0, v)) > consumerTimeout {
+				log.Println("removing consumer from pool:", k)
+				confChange = true
+				delete(pool, k)
+			}
+		}
+
+		// balance bindings
+		if confChange {
+			n := len(pool)
+			l := len(common.RouteKeys)
+			chunks := l / n
+			chunki := 0
+			for k, _ := range pool {
+				//log.Println("binding", chunki*chunks, "-", (chunki+1)*chunks, "to", k)
+				for i := chunki * chunks; i < (chunki+1)*chunks && i < l; i++ {
+					r := string(common.RouteKeys[i])
+					err := common.BindQueueTopic(ch, k, r)
+					failOnError(err, "Failed to bind queue")
+					//log.Println("binding", k, "to", r)
+
+					// unbind
+					for o, _ := range pool {
+						if o == k {
+							continue
+						}
+						//log.Println("unbinding", o, "from", r)
+						err = common.UnbindQueueTopic(ch, o, r)
+						failOnError(err, "Failed to unbind queue")
+					}
+				}
+				chunki++
+			}
+		}
+	}
 }
 
 func secureRandom(n int) (string, error) {

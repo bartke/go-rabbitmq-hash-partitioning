@@ -19,6 +19,8 @@ const (
 	registerTopic = "register"
 )
 
+var RouteKeys string = "abcdefghijklmnopqrstuvwxyz"
+
 func ConnectionString() string {
 	return fmt.Sprintf("%s://%s:%s@%s:%d/", scheme, username, password, hostname, port)
 }
@@ -43,7 +45,7 @@ func setupExchange(ch *amqp.Channel, exchange string) error {
 	)
 }
 
-// SetupQueue creates an exclusive non-durable, autodelete queue
+// SetupQueue creates an non-durable, autodelete queue
 func SetupQueue(ch *amqp.Channel, name string) (amqp.Queue, error) {
 	return ch.QueueDeclare(
 		name,  // name
@@ -70,6 +72,15 @@ func bindQueue(ch *amqp.Channel, name, routingKey, exchange string) error {
 		exchange,   // exchange
 		false,
 		nil)
+}
+
+func UnbindQueueTopic(ch *amqp.Channel, name, routingKey string) error {
+	return ch.QueueUnbind(
+		name,             // name
+		routingKey,       // key
+		datafeedExchange, // exchange
+		nil,              // args
+	)
 }
 
 func Consume(ch *amqp.Channel, queue, consumer string) (<-chan amqp.Delivery, error) {
