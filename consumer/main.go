@@ -53,7 +53,7 @@ func main() {
 	// receive
 	go func() {
 		for d := range msgs {
-			fmt.Printf("%s received: %s\n", tag, d.Body)
+			fmt.Printf("%s received: %s via %s\n", tag, d.Body, d.RoutingKey)
 		}
 	}()
 

@@ -1,12 +1,11 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"math"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/bartke/go-rabbitmq-partitioned-jobs/common"
@@ -14,7 +13,7 @@ import (
 )
 
 const (
-	consumerTimeout = 500 * time.Millisecond
+	consumerTimeout = 600 * time.Millisecond
 )
 
 func main() {
@@ -29,9 +28,7 @@ func main() {
 	err = common.SetupDatafeedExchange(ch)
 	failOnError(err, "Failed to declare a exchange")
 
-	go startRegistry(ch)
-
-	// TODO: wait for consumer
+	registry := NewRegistry(ch)
 
 	// forever
 	var counter int
@@ -40,16 +37,14 @@ func main() {
 		payload = strconv.Itoa(counter)
 		routingKey = common.Hash(counter)
 
-		fmt.Printf(" [x] Sending %v with route %v\n", payload, routingKey)
-		err = common.Publish(ch, routingKey, payload)
-		failOnError(err, "Failed to publish a message")
-
-		time.Sleep(500 * time.Millisecond)
-
-		counter++
-		if counter >= 100 {
-			break
+		if registry.ConsumerCount() > 0 {
+			fmt.Printf(" [x] Sending %v with route %v\n", payload, routingKey)
+			err = common.Publish(ch, routingKey, payload)
+			failOnError(err, "Failed to publish a message")
+			counter++
 		}
+
+		time.Sleep(1000 * time.Millisecond)
 	}
 	fmt.Println("done.")
 }
@@ -61,8 +56,17 @@ func failOnError(err error, msg string) {
 	}
 }
 
-func startRegistry(ch *amqp.Channel) {
-	q, _ := secureRandom(8)
+type Registry struct {
+	ch   *amqp.Channel
+	pool sync.Map
+
+	addConsumer    chan string
+	deleteConsumer chan string
+	consumerCount  int
+}
+
+func NewRegistry(ch *amqp.Channel) *Registry {
+	q := "register"
 	_, err := common.SetupQueue(ch, q)
 	failOnError(err, "Failed to declare queue")
 
@@ -72,73 +76,120 @@ func startRegistry(ch *amqp.Channel) {
 	msgs, err := common.Consume(ch, q, "mgnt")
 	failOnError(err, "Failed to register a consumer")
 
-	pool := make(map[string]int64, 1)
+	r := &Registry{
+		ch:             ch,
+		addConsumer:    make(chan string, 2),
+		deleteConsumer: make(chan string, 2),
+	}
+	go r.runRegistry(msgs)
+	go r.runCheckout()
+	go r.runBalancer()
+	return r
+}
+
+func (r *Registry) ConsumerCount() int {
+	return r.consumerCount
+}
+
+func (r *Registry) runBalancer() {
+	for {
+		select {
+		case k := <-r.addConsumer:
+			r.consumerCount++
+			fmt.Println("adding consumer to pool:", k)
+		case k := <-r.deleteConsumer:
+			r.consumerCount--
+			fmt.Println("removing consumer from pool:", k)
+		}
+		err := r.balanceBindings(r.consumerCount)
+		if err != nil {
+			fmt.Println("Failed to balance bindings", err)
+		}
+	}
+}
+
+func (r *Registry) runCheckout() {
+	for {
+		time.Sleep(consumerTimeout / 2)
+		r.pool.Range(func(ki, vi interface{}) bool {
+			k := ki.(string)
+			v := vi.(int64)
+			lastCheckin := time.Since(time.Unix(0, v))
+			if lastCheckin > consumerTimeout {
+				r.pool.Delete(k)
+				r.deleteConsumer <- k
+			}
+			return true
+		})
+	}
+}
+
+func (r *Registry) runRegistry(msgs <-chan amqp.Delivery) {
 	for d := range msgs {
 		t := time.Now().UnixNano()
-		c := string(d.Body)
-		change := false
+		k := string(d.Body)
 
 		// check in and refresh
-		if _, ok := pool[c]; !ok {
-			fmt.Println("adding consumer to pool:", c)
-			change = true
+		if _, ok := r.pool.LoadOrStore(k, t); !ok {
+			r.addConsumer <- k
+			continue
 		}
-		pool[c] = t
-
-		// TODO: differrent goroutine
-
-		// check out
-		for k, v := range pool {
-			if time.Since(time.Unix(0, v)) > consumerTimeout {
-				fmt.Println("removing consumer from pool:", k)
-				delete(pool, k)
-				change = true
-			}
-		}
-
-		if change {
-			balanceBindings(ch, pool)
-			failOnError(err, "Failed to balance bindings")
-		}
+		r.pool.Store(k, t)
 	}
 }
 
-func secureRandom(n int) (string, error) {
-	bytes := make([]byte, n)
-	if _, err := rand.Read(bytes); err != nil {
-		return "", err
+func (r *Registry) balanceBindings(n int) error {
+	if n == 0 {
+		return fmt.Errorf("no consumers")
 	}
-	return hex.EncodeToString(bytes), nil
-}
-
-func balanceBindings(ch *amqp.Channel, pool map[string]int64) error {
-	n := len(pool)
-	l := len(common.RouteKeys)
-	chunks := int(math.Ceil(float64(l) / float64(n)))
+	fmt.Println("balancing for", n, "consumers")
+	alphabet := len(common.RouteKeys)
+	chunks := int(math.Ceil(float64(alphabet) / float64(n)))
 	chunki := 0
-	for k := range pool {
-		fmt.Println(chunks, "size, binding", chunki*chunks, "-", (chunki+1)*chunks, "to", k)
-		for i := chunki * chunks; i < (chunki+1)*chunks && i < l; i++ {
-			r := string(common.RouteKeys[i])
-			err := common.BindQueueTopic(ch, k, r)
-			if err != nil {
-				return err
-			}
-			fmt.Println("binding", k, "to", r)
 
-			// unbind
-			for o := range pool {
-				if o == k {
-					continue
-				}
-				//fmt.Println("unbinding", o, "from", r)
-				err = common.UnbindQueueTopic(ch, o, r)
-				if err != nil {
-					return err
-				}
+	type binding struct {
+		k, route string
+	}
+	var bindings []binding
+	var unbindings []binding
+
+	r.pool.Range(func(ki, v interface{}) bool {
+		k := ki.(string)
+		s := chunki * chunks
+		e := (chunki + 1) * chunks
+		for i := 0; i < alphabet; i++ {
+			route := string(common.RouteKeys[i])
+			if i >= s && i < e {
+				bindings = append(bindings, binding{k: k, route: route})
+			} else {
+				unbindings = append(unbindings, binding{k: k, route: route})
 			}
 		}
 		chunki++
+		return true
+	})
+
+	for i := range bindings {
+		b := bindings[i]
+
+		// bind route to k
+		fmt.Println("binding", b.k, "to", b.route)
+		err := common.BindQueueTopic(r.ch, b.k, b.route)
+		if err != nil {
+			fmt.Println(err)
+		}
 	}
+
+	for i := range unbindings {
+		b := unbindings[i]
+
+		// unbind route from all but k
+		fmt.Println("unbinding", b.k, "from", b.route)
+		err := common.UnbindQueueTopic(r.ch, b.k, b.route)
+		if err != nil {
+			fmt.Println(err)
+		}
+	}
+
 	return nil
 }

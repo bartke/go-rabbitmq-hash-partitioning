@@ -22,8 +22,7 @@ const (
 var RouteKeys string = "abcdefgh" //ijklmnopqrstuvwxyz"
 
 func Hash(input int) string {
-	//return string(byte(input%26 + 97))
-	return string(byte(input%8 + 97))
+	return string(byte(input%len(RouteKeys) + 97))
 }
 
 func ConnectionString() string {
