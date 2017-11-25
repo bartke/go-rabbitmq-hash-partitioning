@@ -1,28 +1,19 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
-	"os"
-	"strings"
+	"strconv"
+	"time"
 
+	"github.com/bartke/go-rabbitmq-partitioned-jobs/common"
 	"github.com/streadway/amqp"
 )
 
-const (
-	hostname = "192.168.1.28"
-	username = "guest"
-	password = "guest"
-	scheme   = "amqp"
-	port     = 5672
-)
-
-func connectionString() string {
-	return fmt.Sprintf("%s://%s:%s@%s:%d/", scheme, username, password, hostname, port)
-}
-
 func main() {
-	conn, err := amqp.Dial(connectionString())
+	conn, err := amqp.Dial(common.ConnectionString())
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
 
@@ -30,39 +21,32 @@ func main() {
 	failOnError(err, "Failed to open a channel")
 	defer ch.Close()
 
-	q, err := ch.QueueDeclare(
-		"task_queue", // name
-		true,         // durable
-		false,        // delete when unused
-		false,        // exclusive
-		false,        // no-wait
-		nil,          // arguments
-	)
-	failOnError(err, "Failed to declare a queue")
+	err = common.SetupDatafeedExchange(ch)
+	failOnError(err, "Failed to declare a exchange")
 
-	body := bodyFrom(os.Args)
-	err = ch.Publish(
-		"",     // exchange
-		q.Name, // routing key
-		false,  // mandatory
-		false,
-		amqp.Publishing{
-			DeliveryMode: amqp.Persistent,
-			ContentType:  "text/plain",
-			Body:         []byte(body),
-		})
-	failOnError(err, "Failed to publish a message")
-	log.Printf(" [x] Sent %s", body)
-}
+	go startRegistry(ch)
 
-func bodyFrom(args []string) string {
-	var s string
-	if (len(args) < 2) || os.Args[1] == "" {
-		s = "hello"
-	} else {
-		s = strings.Join(args[1:], " ")
+	// TODO: wait for consumer
+
+	// forever
+	var counter int
+	var routingKey, payload string
+	for {
+		payload = strconv.Itoa(counter)
+		routingKey = hash(counter)
+
+		err = common.Publish(ch, routingKey, payload)
+		failOnError(err, "Failed to publish a message")
+
+		log.Printf(" [x] Sent %v with route %v", payload, routingKey)
+		time.Sleep(500 * time.Millisecond)
+
+		counter++
+		if counter >= 100 {
+			break
+		}
 	}
-	return s
+	log.Println("done.")
 }
 
 func failOnError(err error, msg string) {
@@ -70,4 +54,34 @@ func failOnError(err error, msg string) {
 		log.Fatalf("%s: %s", msg, err)
 		panic(fmt.Sprintf("%s: %s", msg, err))
 	}
+}
+
+func hash(input int) string {
+	return string(byte(input%26 + 97))
+}
+
+func startRegistry(ch *amqp.Channel) {
+	q, _ := secureRandom(8)
+	_, err := common.SetupQueue(ch, q)
+	failOnError(err, "Failed to declare queue")
+
+	err = common.BindRegistry(ch, q)
+	failOnError(err, "Failed to bind queue")
+
+	msgs, err := common.Consume(ch, q, "mgnt")
+	failOnError(err, "Failed to register a consumer")
+
+	go func() {
+		for d := range msgs {
+			log.Printf("heartbeat: %s", d.Body)
+		}
+	}()
+}
+
+func secureRandom(n int) (string, error) {
+	bytes := make([]byte, n)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
 }
