@@ -40,7 +40,7 @@ func NewRegistry(ch *amqp.Channel, timeout time.Duration) (*Registry, error) {
 		addConsumer:    make(chan string, 2),
 		deleteConsumer: make(chan string, 2),
 	}
-	go r.runRegistry(msgs)
+	go r.runCheckin(msgs)
 	go r.runCheckout(timeout)
 	go r.runBalancer()
 	return r, nil
@@ -55,14 +55,14 @@ func (r *Registry) runBalancer() {
 		select {
 		case k := <-r.addConsumer:
 			r.consumerCount++
-			fmt.Println("adding consumer to pool:", k)
+			fmt.Println(" -> adding consumer to pool:", k)
 		case k := <-r.deleteConsumer:
 			r.consumerCount--
-			fmt.Println("removing consumer from pool:", k)
+			fmt.Println(" -> removing consumer from pool:", k)
 		}
 		err := r.balanceBindings(r.consumerCount)
 		if err != nil {
-			fmt.Println("Failed to balance bindings", err)
+			fmt.Println(" !! failed to balance bindings:", err)
 		}
 	}
 }
@@ -83,7 +83,7 @@ func (r *Registry) runCheckout(timeout time.Duration) {
 	}
 }
 
-func (r *Registry) runRegistry(msgs <-chan amqp.Delivery) {
+func (r *Registry) runCheckin(msgs <-chan amqp.Delivery) {
 	for d := range msgs {
 		t := time.Now().UnixNano()
 		k := string(d.Body)
@@ -101,16 +101,15 @@ func (r *Registry) balanceBindings(n int) error {
 	if n == 0 {
 		return fmt.Errorf("no consumers")
 	}
-	fmt.Println("balancing for", n, "consumers")
+	fmt.Println(" -> balancing for", n, "consumers")
 	alphabet := len(RouteKeys)
 	chunks := int(math.Ceil(float64(alphabet) / float64(n)))
 	chunki := 0
 
 	type binding struct {
-		k, route string
+		k, route, t string
 	}
 	var bindings []binding
-	var unbindings []binding
 
 	r.pool.Range(func(ki, v interface{}) bool {
 		k := ki.(string)
@@ -119,9 +118,9 @@ func (r *Registry) balanceBindings(n int) error {
 		for i := 0; i < alphabet; i++ {
 			route := string(RouteKeys[i])
 			if i >= s && i < e {
-				bindings = append(bindings, binding{k: k, route: route})
+				bindings = append(bindings, binding{k: k, route: route, t: "bind"})
 			} else {
-				unbindings = append(unbindings, binding{k: k, route: route})
+				bindings = append(bindings, binding{k: k, route: route, t: "unbind"})
 			}
 		}
 		chunki++
@@ -131,20 +130,14 @@ func (r *Registry) balanceBindings(n int) error {
 	for i := range bindings {
 		b := bindings[i]
 
-		// bind route to k
-		fmt.Println("binding", b.k, "to", b.route)
-		err := BindQueueTopic(r.ch, b.k, b.route)
-		if err != nil {
-			fmt.Println(err)
+		var err error
+		if b.t == "bind" {
+			//fmt.Println("binding", b.k, "to", b.route)
+			err = BindQueueTopic(r.ch, b.k, b.route)
+		} else {
+			//fmt.Println("unbinding", b.k, "from", b.route)
+			err = UnbindQueueTopic(r.ch, b.k, b.route)
 		}
-	}
-
-	for i := range unbindings {
-		b := unbindings[i]
-
-		// unbind route from all but k
-		fmt.Println("unbinding", b.k, "from", b.route)
-		err := UnbindQueueTopic(r.ch, b.k, b.route)
 		if err != nil {
 			fmt.Println(err)
 		}

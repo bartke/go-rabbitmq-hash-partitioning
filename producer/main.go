@@ -37,13 +37,13 @@ func main() {
 		routingKey = common.Hash(counter)
 
 		if registry.ConsumerCount() > 0 {
-			fmt.Printf(" [x] Sending %v with route %v\n", payload, routingKey)
+			fmt.Printf(" [->] Sending %v with route %v\n", payload, routingKey)
 			err = common.Publish(ch, routingKey, payload)
 			failOnError(err, "Failed to publish a message")
 			counter++
 		}
 
-		time.Sleep(1000 * time.Millisecond)
+		time.Sleep(500 * time.Millisecond)
 	}
 	fmt.Println("done.")
 }

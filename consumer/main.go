@@ -53,14 +53,14 @@ func main() {
 	// receive
 	go func() {
 		for d := range msgs {
-			fmt.Printf("%s received: %s via %s\n", tag, d.Body, d.RoutingKey)
+			fmt.Printf(" [<-] %s received: %s via %s\n", tag, d.Body, d.RoutingKey)
 		}
 	}()
 
 	// start pinging after we're listening
 	go heartbeat(ch, tag)
 
-	fmt.Printf(" [*] Waiting for messages. To exit press CTRL+C\n")
+	fmt.Printf(" [**] %s running\n", tag)
 	<-forever
 }
 
