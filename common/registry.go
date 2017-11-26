@@ -20,8 +20,8 @@ type Registry struct {
 	pool    sync.Map
 	timeout time.Duration
 
-	isSlave        bool
-	becomemsMaster chan bool
+	isSlave      bool
+	becomeMaster chan bool
 
 	addConsumer    chan string
 	deleteConsumer chan string
@@ -38,7 +38,7 @@ func NewRegistry(conn *amqp.Connection, timeout time.Duration) (*Registry, error
 		conn:           conn,
 		ch:             ch,
 		timeout:        timeout,
-		becomemsMaster: make(chan bool, 1),
+		becomeMaster:   make(chan bool, 1),
 		addConsumer:    make(chan string, 2),
 		deleteConsumer: make(chan string, 2),
 	}
@@ -74,18 +74,18 @@ func (r *Registry) Run() {
 		}
 		time.Sleep(partitionMasterFailover)
 	}
-	if r.isSlave {
-		// fire and reset
-		close(r.becomemsMaster)
-		time.Sleep(partitionMasterFailover)
-		r.becomemsMaster = make(chan bool, 1)
-	}
-	r.isSlave = false
 	fmt.Println(" -> assuming partition master")
 
-	go r.runCheckin(msgs)
-	go r.runCheckout(r.timeout)
-	go r.runBalancer()
+	go r.runCheckin(msgs, false)
+	go r.runCheckout(r.timeout, false)
+	go r.runBalancer(false)
+
+	if r.isSlave {
+		// fire and reset
+		close(r.becomeMaster)
+		r.becomeMaster = make(chan bool, 1)
+		r.isSlave = false
+	}
 }
 
 func (r *Registry) ConsumerCount() int {
@@ -122,12 +122,12 @@ func (r *Registry) setupSlave() {
 	r.isSlave = true
 	fmt.Println(" -> assuming partition slave")
 
-	go r.runCheckin(msgs)
-	go r.runCheckout(r.timeout)
-	go r.runBalancer()
+	go r.runCheckin(msgs, true)
+	go r.runCheckout(r.timeout, true)
+	go r.runBalancer(true)
 }
 
-func (r *Registry) runBalancer() {
+func (r *Registry) runBalancer(isSlave bool) {
 	for {
 		select {
 		case k := <-r.addConsumer:
@@ -136,13 +136,13 @@ func (r *Registry) runBalancer() {
 		case k := <-r.deleteConsumer:
 			r.consumerCount--
 			fmt.Println(" -> removing consumer from pool:", k)
-		case <-r.becomemsMaster:
-			if r.isSlave {
+		case <-r.becomeMaster:
+			if isSlave {
 				fmt.Println("slave exiting balancer")
 				return
 			}
 		}
-		if r.isSlave {
+		if isSlave {
 			// slaves don't balance
 			continue
 		}
@@ -153,12 +153,12 @@ func (r *Registry) runBalancer() {
 	}
 }
 
-func (r *Registry) runCheckout(timeout time.Duration) {
+func (r *Registry) runCheckout(timeout time.Duration, isSlave bool) {
 	t := time.NewTicker(timeout / 2)
 	for {
 		select {
-		case <-r.becomemsMaster:
-			if r.isSlave {
+		case <-r.becomeMaster:
+			if isSlave {
 				fmt.Println("slave exiting check-outs")
 				return
 			}
@@ -177,11 +177,11 @@ func (r *Registry) runCheckout(timeout time.Duration) {
 	}
 }
 
-func (r *Registry) runCheckin(msgs <-chan amqp.Delivery) {
+func (r *Registry) runCheckin(msgs <-chan amqp.Delivery, isSlave bool) {
 	for {
 		select {
-		case <-r.becomemsMaster:
-			if r.isSlave {
+		case <-r.becomeMaster:
+			if isSlave {
 				fmt.Println("slave exiting check-ins")
 				return
 			}
