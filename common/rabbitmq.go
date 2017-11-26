@@ -30,34 +30,34 @@ func ConnectionString() string {
 }
 
 func SetupRegistryExchange(ch *amqp.Channel) error {
-	return setupExchange(ch, registryExchange)
+	return setupExchange(ch, registryExchange, "fanout")
 }
 
 func SetupDatafeedExchange(ch *amqp.Channel) error {
-	return setupExchange(ch, datafeedExchange)
+	return setupExchange(ch, datafeedExchange, "topic")
 }
 
-func setupExchange(ch *amqp.Channel, exchange string) error {
+func setupExchange(ch *amqp.Channel, exchange, exchangeType string) error {
 	return ch.ExchangeDeclare(
-		exchange, // name
-		"topic",  // type
-		true,     // durable
-		false,    // auto-deleted
-		false,    // internal
-		false,    // no-wait
-		nil,      // arguments
+		exchange,     // name
+		exchangeType, // type
+		true,         // durable
+		false,        // auto-deleted
+		false,        // internal
+		false,        // no-wait
+		nil,          // arguments
 	)
 }
 
 // SetupQueue creates an non-durable, autodelete queue
-func SetupQueue(ch *amqp.Channel, name string) (amqp.Queue, error) {
+func SetupQueue(ch *amqp.Channel, name string, durable, autodel, exclusive bool) (amqp.Queue, error) {
 	return ch.QueueDeclare(
-		name,  // name
-		false, // durable
-		true,  // delete when unused
-		false, // exclusive
-		false, // no-wait
-		nil,   // arguments
+		name,      // name
+		durable,   // durable
+		autodel,   // delete when unused
+		exclusive, // exclusive
+		false,     // no-wait
+		nil,       // arguments
 	)
 }
 
@@ -89,7 +89,7 @@ func UnbindQueueTopic(ch *amqp.Channel, name, routingKey string) error {
 
 func Consume(ch *amqp.Channel, queue, consumer string) (<-chan amqp.Delivery, error) {
 	err := ch.Qos(
-		1,     // prefetch count
+		16,    // prefetch count
 		0,     // prefetch size
 		false, // global
 	)
@@ -101,7 +101,7 @@ func Consume(ch *amqp.Channel, queue, consumer string) (<-chan amqp.Delivery, er
 		queue,    // queue
 		consumer, // consumer
 		true,     // auto-ack (example)
-		false,    // exclusive
+		true,     // exclusive
 		false,    // no-local
 		false,    // no-wait
 		nil,      // args

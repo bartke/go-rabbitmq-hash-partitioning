@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/bartke/go-rabbitmq-partitioned-jobs/common"
@@ -40,7 +41,7 @@ func main() {
 	failOnError(err, "Failed to declare a exchange")
 
 	// setup queue without binding
-	_, err = common.SetupQueue(ch, tag)
+	_, err = common.SetupQueue(ch, tag, true, false, false)
 	failOnError(err, "Failed to declare queue")
 
 	// start consumer
@@ -66,8 +67,8 @@ func main() {
 
 func failOnError(err error, msg string) {
 	if err != nil {
-		log.Fatalf("%s: %s", msg, err)
-		panic(fmt.Sprintf("%s: %s", msg, err))
+		log.Println("%s: %s\n", msg, err)
+		os.Exit(1)
 	}
 }
 

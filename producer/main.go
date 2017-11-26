@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"os"
 	"strconv"
 	"time"
 
@@ -26,8 +26,12 @@ func main() {
 	err = common.SetupDatafeedExchange(ch)
 	failOnError(err, "Failed to declare a exchange")
 
-	registry, err := common.NewRegistry(ch, consumerTimeout)
+	err = common.SetupRegistryExchange(ch)
+	failOnError(err, "Failed to declare a exchange")
+
+	registry, err := common.NewRegistry(conn, consumerTimeout)
 	failOnError(err, "Failed to create registry")
+	go registry.Run()
 
 	// forever
 	var counter int
@@ -50,7 +54,7 @@ func main() {
 
 func failOnError(err error, msg string) {
 	if err != nil {
-		log.Fatalf("%s: %s", msg, err)
-		panic(fmt.Sprintf("%s: %s", msg, err))
+		fmt.Printf("%s: %s\n", msg, err)
+		os.Exit(1)
 	}
 }
