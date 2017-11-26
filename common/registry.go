@@ -125,6 +125,15 @@ func (r *Registry) setupSlave() {
 	go r.runCheckin(msgs, true)
 	go r.runCheckout(r.timeout, true)
 	go r.runBalancer(true)
+
+	go func() {
+		select {
+		case <-r.becomeMaster:
+			time.Sleep(partitionMasterFailover)
+			fmt.Println("detaching slave consumer")
+			ch.Close()
+		}
+	}()
 }
 
 func (r *Registry) runBalancer(isSlave bool) {
