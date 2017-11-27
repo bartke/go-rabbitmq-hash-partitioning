@@ -477,6 +477,13 @@ func (r *Registry) drainQueue(k string, m int) error {
 }
 
 func (r *Registry) checkRecentExits() error {
+	// rebalance first so we don't loose anything while retiring
+	err := r.balanceBindings(r.consumerCount)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	var configChange bool
 	for i := 0; i < r.lastExits.Len(); i++ {
 		k := r.lastExits.Pop()
 		// this one may break, get a new channel on every try
@@ -491,13 +498,17 @@ func (r *Registry) checkRecentExits() error {
 			continue
 		}
 		if q.Consumers == 0 {
+			fmt.Println(" XX retiring stuck queue", k)
 			err = r.retireQueue(k)
-		}
-		if err != nil {
-			fmt.Println(err)
-			continue
+			if err != nil {
+				fmt.Println(err)
+			}
+			configChange = true
 		}
 	}
-
-	return r.balanceBindings(r.consumerCount)
+	if configChange {
+		fmt.Println(" XX rebalancing after config change ")
+		return r.balanceBindings(r.consumerCount)
+	}
+	return nil
 }
