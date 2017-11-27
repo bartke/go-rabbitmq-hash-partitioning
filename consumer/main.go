@@ -55,6 +55,7 @@ func main() {
 	go func() {
 		for d := range msgs {
 			fmt.Printf(" [<-] %s received: %s via %s\n", tag, d.Body, d.RoutingKey)
+			d.Ack(false)
 		}
 	}()
 

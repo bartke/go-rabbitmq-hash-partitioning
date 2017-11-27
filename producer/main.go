@@ -29,16 +29,36 @@ func main() {
 	err = common.SetupRegistryExchange(ch)
 	failOnError(err, "Failed to declare a exchange")
 
-	registry, err := common.NewRegistry(conn, consumerTimeout)
+	drain := make(chan []byte, 16)
+	registry, err := common.NewRegistry(conn, consumerTimeout, drain)
 	failOnError(err, "Failed to create registry")
 	go registry.Run()
+
+	go func() {
+		var routingKey, payload string
+		for d := range drain {
+			payload = string(d)
+			routingKey = common.Hash(payload)
+
+			// only refeed if consumer present
+			for {
+				if registry.ConsumerCount() > 0 {
+					fmt.Printf(" [=>] Sending %v with route %v (drain)\n", payload, routingKey)
+					err = common.Publish(ch, routingKey, payload)
+					failOnError(err, "Failed to publish a message")
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+		}
+	}()
 
 	// forever
 	var counter int
 	var routingKey, payload string
 	for {
 		payload = strconv.Itoa(counter)
-		routingKey = common.Hash(counter)
+		routingKey = common.Hash(payload)
 
 		if registry.ConsumerCount() > 0 {
 			fmt.Printf(" [->] Sending %v with route %v\n", payload, routingKey)
@@ -49,6 +69,8 @@ func main() {
 
 		time.Sleep(500 * time.Millisecond)
 	}
+
+	ch.Close()
 	fmt.Println("done.")
 }
 

@@ -25,10 +25,11 @@ type Registry struct {
 
 	addConsumer    chan string
 	deleteConsumer chan string
+	drain          chan []byte
 	consumerCount  int
 }
 
-func NewRegistry(conn *amqp.Connection, timeout time.Duration) (*Registry, error) {
+func NewRegistry(conn *amqp.Connection, timeout time.Duration, drain chan []byte) (*Registry, error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, err
@@ -38,6 +39,7 @@ func NewRegistry(conn *amqp.Connection, timeout time.Duration) (*Registry, error
 		conn:           conn,
 		ch:             ch,
 		timeout:        timeout,
+		drain:          drain,
 		becomeMaster:   make(chan bool, 1),
 		addConsumer:    make(chan string, 2),
 		deleteConsumer: make(chan string, 2),
@@ -76,8 +78,8 @@ func (r *Registry) Run() {
 	}
 	fmt.Println(" -> assuming partition master")
 
-	go r.runCheckin(msgs, false)
-	go r.runCheckout(r.timeout, false)
+	go r.runCheckIn(msgs, false)
+	go r.runCheckOut(r.timeout, false)
 	go r.runBalancer(false)
 
 	if r.isSlave {
@@ -122,8 +124,8 @@ func (r *Registry) setupSlave() {
 	r.isSlave = true
 	fmt.Println(" -> assuming partition slave")
 
-	go r.runCheckin(msgs, true)
-	go r.runCheckout(r.timeout, true)
+	go r.runCheckIn(msgs, true)
+	go r.runCheckOut(r.timeout, true)
 	go r.runBalancer(true)
 
 	go func() {
@@ -138,12 +140,15 @@ func (r *Registry) setupSlave() {
 
 func (r *Registry) runBalancer(isSlave bool) {
 	for {
+		var k, action string
 		select {
-		case k := <-r.addConsumer:
+		case k = <-r.addConsumer:
 			r.consumerCount++
+			action = "add"
 			fmt.Println(" -> adding consumer to pool:", k)
-		case k := <-r.deleteConsumer:
+		case k = <-r.deleteConsumer:
 			r.consumerCount--
+			action = "delete"
 			fmt.Println(" -> removing consumer from pool:", k)
 		case <-r.becomeMaster:
 			if isSlave {
@@ -157,12 +162,16 @@ func (r *Registry) runBalancer(isSlave bool) {
 		}
 		err := r.balanceBindings(r.consumerCount)
 		if err != nil {
-			fmt.Println(" !! failed to balance bindings:", err)
+			fmt.Println(" [!!] failed to balance bindings:", err)
+		}
+		// post rebalancing
+		if action == "delete" {
+			go r.retireQueue(k)
 		}
 	}
 }
 
-func (r *Registry) runCheckout(timeout time.Duration, isSlave bool) {
+func (r *Registry) runCheckOut(timeout time.Duration, isSlave bool) {
 	t := time.NewTicker(timeout / 2)
 	for {
 		select {
@@ -175,8 +184,8 @@ func (r *Registry) runCheckout(timeout time.Duration, isSlave bool) {
 			r.pool.Range(func(ki, vi interface{}) bool {
 				k := ki.(string)
 				v := vi.(int64)
-				lastCheckin := time.Since(time.Unix(0, v))
-				if lastCheckin > timeout {
+				lastCheckIn := time.Since(time.Unix(0, v))
+				if lastCheckIn > timeout {
 					r.pool.Delete(k)
 					r.deleteConsumer <- k
 				}
@@ -186,7 +195,7 @@ func (r *Registry) runCheckout(timeout time.Duration, isSlave bool) {
 	}
 }
 
-func (r *Registry) runCheckin(msgs <-chan amqp.Delivery, isSlave bool) {
+func (r *Registry) runCheckIn(msgs <-chan amqp.Delivery, isSlave bool) {
 	for {
 		select {
 		case <-r.becomeMaster:
@@ -195,6 +204,7 @@ func (r *Registry) runCheckin(msgs <-chan amqp.Delivery, isSlave bool) {
 				return
 			}
 		case d := <-msgs:
+			d.Ack(false)
 			t := time.Now().UnixNano()
 			k := string(d.Body)
 
@@ -255,4 +265,60 @@ func (r *Registry) balanceBindings(n int) error {
 	}
 
 	return nil
+}
+
+func (r *Registry) retireQueue(k string) {
+	//  1 unbind all
+	r.unbindAll(k)
+	//  2 attach and drain residuals
+	q, err := r.ch.QueueInspect(k)
+	if err != nil {
+		fmt.Println("couldn't inspect queue", err)
+		return
+	}
+	if q.Messages > 0 {
+		fmt.Println(" -> cleanup draining", q.Messages, "messages")
+		r.drainQueue(k, q.Messages)
+	}
+	//  3 delete queue
+	fmt.Println(" -> cleanup deleting queue", k)
+	// agressive delete here, may need to retry above in production setup
+	_, err = r.ch.QueueDelete(k, false, false, true)
+}
+
+func (r *Registry) unbindAll(k string) {
+	for i := 0; i < len(RouteKeys); i++ {
+		route := string(RouteKeys[i])
+		fmt.Println(" -> cleanup unbinding", k, "from", route)
+		err := UnbindQueueTopic(r.ch, k, route)
+		if err != nil {
+			fmt.Println("unbinding", k, "from", route, "failed", err)
+		}
+	}
+}
+
+func (r *Registry) drainQueue(k string, m int) {
+	ch, err := r.conn.Channel()
+	if err != nil {
+		fmt.Println("couldn't open channel", err)
+		return
+	}
+	msgs, err := Consume(ch, k, "mgnt")
+	if err != nil {
+		fmt.Println("couldn't consume queue", err)
+		return
+	}
+	var i int
+	for {
+		i++
+		d := <-msgs
+		d.Ack(false)
+		r.drain <- d.Body
+		fmt.Println(" -> cleanup drained from ", k, i, "/", m)
+		q, _ := r.ch.QueueInspect(k)
+		if q.Messages == 0 {
+			break
+		}
+	}
+	ch.Close()
 }

@@ -19,12 +19,6 @@ const (
 	registerTopic = "register"
 )
 
-var RouteKeys string = "abcdefgh" //ijklmnopqrstuvwxyz"
-
-func Hash(input int) string {
-	return string(byte(input%len(RouteKeys) + 97))
-}
-
 func ConnectionString() string {
 	return fmt.Sprintf("%s://%s:%s@%s:%d/", scheme, username, password, hostname, port)
 }
@@ -100,7 +94,7 @@ func Consume(ch *amqp.Channel, queue, consumer string) (<-chan amqp.Delivery, er
 	return ch.Consume(
 		queue,    // queue
 		consumer, // consumer
-		true,     // auto-ack (example)
+		false,    // auto-ack (example)
 		true,     // exclusive
 		false,    // no-local
 		false,    // no-wait

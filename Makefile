@@ -6,6 +6,10 @@ default: all
 
 all: build
 
+get:
+	cd producer && go get
+	cd consumer && go get
+
 run: build
 	@echo " -- starting consumer 1"
 	@./consumer/consumer -tag c1 &
