@@ -41,7 +41,7 @@ func main() {
 	failOnError(err, "Failed to open channel")
 	defer ch.Close()
 
-	// ensure the registry exists
+	// ensure the registry exists for heartbeats
 	err = common.SetupRegistryExchange(ch)
 	failOnError(err, "Failed to declare a exchange")
 
@@ -50,23 +50,25 @@ func main() {
 	failOnError(err, "Failed to declare queue")
 
 	// start consumer
-	msgs, err := common.Consume(ch, tag, "comsumer-"+tag)
+	msgs, err := common.Consume(ch, tag, "comsumer-"+tag, true)
 	failOnError(err, "Failed to register a consumer")
 
 	// register and keep alive
 	// receive
 	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
-		select {
-		case d := <-msgs:
-			fmt.Printf(" [<-] %s received: %s via %s\n", tag, d.Body, d.RoutingKey)
-			d.Ack(false)
-		case <-exitChan:
-			defer func(wg *sync.WaitGroup) {
-				wg.Done()
-			}(wg)
-			fmt.Println("shutting down consumer")
-			return
+		for {
+			select {
+			case d := <-msgs:
+				fmt.Printf(" [<-] %s received: %s via %s\n", tag, d.Body, d.RoutingKey)
+				d.Ack(false)
+			case <-exitChan:
+				defer func(wg *sync.WaitGroup) {
+					wg.Done()
+				}(wg)
+				fmt.Println("shutting down consumer")
+				return
+			}
 		}
 	}(&wg)
 

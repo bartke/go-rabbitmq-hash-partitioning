@@ -15,12 +15,18 @@ const (
 
 	datafeedExchange = "datafeed"
 	registryExchange = "registry"
+	commandExchange  = "command"
 
 	registerTopic = "register"
+	commandTopic  = "command"
 )
 
 func ConnectionString() string {
 	return fmt.Sprintf("%s://%s:%s@%s:%d/", scheme, username, password, hostname, port)
+}
+
+func SetupCommandExchange(ch *amqp.Channel) error {
+	return setupExchange(ch, commandExchange, "fanout")
 }
 
 func SetupRegistryExchange(ch *amqp.Channel) error {
@@ -56,14 +62,10 @@ func SetupQueue(ch *amqp.Channel, name string, durable, autodel, exclusive bool)
 }
 
 func BindQueueTopic(ch *amqp.Channel, name, routingKey string) error {
-	return bindQueue(ch, name, routingKey, datafeedExchange)
+	return BindQueue(ch, name, routingKey, datafeedExchange)
 }
 
-func BindRegistry(ch *amqp.Channel, name string) error {
-	return bindQueue(ch, name, registerTopic, registryExchange)
-}
-
-func bindQueue(ch *amqp.Channel, name, routingKey, exchange string) error {
+func BindQueue(ch *amqp.Channel, name, routingKey, exchange string) error {
 	return ch.QueueBind(
 		name,       // queue name
 		routingKey, // routing key
@@ -81,7 +83,7 @@ func UnbindQueueTopic(ch *amqp.Channel, name, routingKey string) error {
 	)
 }
 
-func Consume(ch *amqp.Channel, queue, consumer string) (<-chan amqp.Delivery, error) {
+func Consume(ch *amqp.Channel, queue, consumer string, exclusive bool) (<-chan amqp.Delivery, error) {
 	err := ch.Qos(
 		16,    // prefetch count
 		0,     // prefetch size
@@ -92,13 +94,13 @@ func Consume(ch *amqp.Channel, queue, consumer string) (<-chan amqp.Delivery, er
 	}
 
 	return ch.Consume(
-		queue,    // queue
-		consumer, // consumer
-		false,    // auto-ack (example)
-		true,     // exclusive
-		false,    // no-local
-		false,    // no-wait
-		nil,      // args
+		queue,     // queue
+		consumer,  // consumer
+		false,     // auto-ack (example)
+		exclusive, // exclusive
+		false,     // no-local
+		false,     // no-wait
+		nil,       // args
 	)
 }
 
@@ -108,6 +110,10 @@ func Heartbeat(ch *amqp.Channel, payload string) error {
 
 func Publish(ch *amqp.Channel, routingKey, payload string) error {
 	return publish(ch, datafeedExchange, routingKey, payload)
+}
+
+func Command(ch *amqp.Channel, routingKey, payload string) error {
+	return publish(ch, commandExchange, routingKey, payload)
 }
 
 func publish(ch *amqp.Channel, exchange, routingKey, payload string) error {
