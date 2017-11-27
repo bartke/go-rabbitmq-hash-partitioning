@@ -27,6 +27,7 @@ type Registry struct {
 	isSlave      bool
 	becomeMaster chan bool
 
+	lastExits      *Queue
 	consumerChange time.Time
 
 	wg             sync.WaitGroup
@@ -62,6 +63,7 @@ func NewRegistry(conn *amqp.Connection, timeout time.Duration, drain chan []byte
 		quitChan:       make(chan struct{}),
 		addConsumer:    make(chan string, 2),
 		deleteConsumer: make(chan string, 2),
+		lastExits:      NewQueue(3),
 	}
 	return r, nil
 }
@@ -70,9 +72,6 @@ func NewRegistry(conn *amqp.Connection, timeout time.Duration, drain chan []byte
 // only become once the master node until it drops out. A slave can only be
 // promoted, a master can never be demoted without dropping out.
 func (r *Registry) Run() {
-	// every instance will be able to execute commands
-	go r.runCommandListener()
-
 	t := time.NewTicker(partitionMasterFailover)
 
 	var msgs <-chan amqp.Delivery
@@ -105,6 +104,16 @@ loop:
 		close(r.becomeMaster)
 		r.becomeMaster = make(chan bool, 1)
 		r.isSlave = false
+	}
+
+	// only master runs the command listener
+	go r.runCommandListener()
+
+	fmt.Println(" -> master assumed, rebalance and checking recently exited consumers")
+
+	err := r.checkRecentExits()
+	if err != nil {
+		fmt.Println(err)
 	}
 }
 
@@ -209,14 +218,13 @@ func (r *Registry) setupSlave() {
 }
 
 func (r *Registry) runCommandListener() {
-	// everyone listens on the same queue, durable for rexecution
-	// non-exclusive consumer, round robin between all managers
+	// durable for rexecution, exclusive for order
 	msgs, ch, err := r.createAndAttach(
 		commandQueue,
 		commandTopic,
 		commandExchange,
-		true,  // persistent
-		false) // exclusive
+		true, // persistent
+		true) // exclusive
 	if err != nil {
 		fmt.Println("slave setup failed with consume", err)
 		return
@@ -227,6 +235,7 @@ func (r *Registry) runCommandListener() {
 	r.wg.Add(1)
 	go func() {
 		for {
+			// one at a time
 			select {
 			case <-r.quitChan:
 				ch.Close()
@@ -286,6 +295,7 @@ func (r *Registry) runBalancer(isSlave bool) {
 		case k = <-r.deleteConsumer:
 			r.consumerCount--
 			action = "delete"
+			r.lastExits.Push(k)
 			fmt.Println(" -> removing consumer from pool:", k)
 		case <-r.becomeMaster:
 			if isSlave {
@@ -455,18 +465,39 @@ func (r *Registry) drainQueue(k string, m int) error {
 	if err != nil {
 		return fmt.Errorf("couldn't consume queue %s", err)
 	}
-	var i int
-	for {
-		i++
+	for i := m; i > 0; i-- {
 		d := <-msgs
-		d.Ack(false)
 		r.drain <- d.Body
-		fmt.Println(" -> cleanup drained from ", k, i, "/", m)
-		q, _ := r.ch.QueueInspect(k)
-		if q.Messages == 0 {
-			break
-		}
+		fmt.Printf(" => cleanup drain %s from %s\n", d.Body, k)
+		d.Ack(false)
 	}
+	fmt.Println(" -> cleanup", k, "drained.")
 	ch.Close()
 	return nil
+}
+
+func (r *Registry) checkRecentExits() error {
+	for i := 0; i < r.lastExits.Len(); i++ {
+		k := r.lastExits.Pop()
+		// this one may break, get a new channel on every try
+		ch, err := r.conn.Channel()
+		if err != nil {
+			// if this fails we're screwed anyways
+			return fmt.Errorf("couldn't open channel %s", err)
+		}
+		q, err := ch.QueueInspect(k)
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+		if q.Consumers == 0 {
+			err = r.retireQueue(k)
+		}
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
+	}
+
+	return r.balanceBindings(r.consumerCount)
 }
