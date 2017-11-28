@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bartke/go-rabbitmq-partitioned-jobs/common"
+	"github.com/bartke/go-rabbitmq-hash-partitioning/common"
 	"github.com/streadway/amqp"
 )
 
@@ -26,9 +26,6 @@ func main() {
 	err = common.SetupDatafeedExchange(ch)
 	failOnError(err, "Failed to declare a exchange")
 
-	err = common.SetupRegistryExchange(ch)
-	failOnError(err, "Failed to declare a exchange")
-
 	drain := make(chan []byte, 16)
 	registry, err := common.NewRegistry(conn, consumerTimeout, drain)
 	failOnError(err, "Failed to create registry")
@@ -42,7 +39,7 @@ func main() {
 
 			// only refeed if consumer present
 			for {
-				if registry.ConsumerCount() > 0 {
+				if registry.SafeToSend() {
 					fmt.Printf(" [=>] Sending %v with route %v (drain)\n", payload, routingKey)
 					err = common.Publish(ch, routingKey, payload)
 					failOnError(err, "Failed to publish a message")
@@ -60,7 +57,7 @@ func main() {
 		payload = strconv.Itoa(counter)
 		routingKey = common.Hash(payload)
 
-		if registry.ConsumerCount() > 0 {
+		if registry.SafeToSend() {
 			fmt.Printf(" [->] Sending %v with route %v\n", payload, routingKey)
 			err = common.Publish(ch, routingKey, payload)
 			failOnError(err, "Failed to publish a message")
