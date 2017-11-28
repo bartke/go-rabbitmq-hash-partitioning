@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bartke/go-rabbitmq-partitioned-jobs/common"
+	"github.com/bartke/go-rabbitmq-hash-partitioning/common"
 	"github.com/streadway/amqp"
 )
 
@@ -45,11 +45,11 @@ func main() {
 	err = common.SetupRegistryExchange(ch)
 	failOnError(err, "Failed to declare a exchange")
 
-	// setup queue without binding
+	// setup queue without binding, durable, non-auto delete, non-exclusive
 	_, err = common.SetupQueue(ch, tag, true, false, false)
 	failOnError(err, "Failed to declare queue")
 
-	// start consumer
+	// start exclusive consumer
 	msgs, err := common.Consume(ch, tag, "comsumer-"+tag, true)
 	failOnError(err, "Failed to register a consumer")
 

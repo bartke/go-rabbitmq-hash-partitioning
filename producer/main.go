@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/bartke/go-rabbitmq-partitioned-jobs/common"
+	"github.com/bartke/go-rabbitmq-hash-partitioning/common"
 	"github.com/streadway/amqp"
 )
 

@@ -1,6 +1,6 @@
 # Fault-tolerant RabbitMQ Topic Partitioning
 
-## Failover Protocol
+## Failover Protocol Example
 
 - run two producers nodes and one consumer
 - kill consumer and immediately kill master node
