@@ -1,6 +1,26 @@
-# Fault-tolerant RabbitMQ Topic Partitioning
+# Go RabbitMQ Topic Partitioning Example
 
-## Failover Protocol Example
+If consuming nodes keep state based on the task type it may be desired to
+partition jobs over a given number of consumers. These consumers can then
+lazily writeback their state and load it once when receiving a new type.
+Otherwise nodes can operate fully in-memory. To achieve this without losing
+message when nodes join and leave we have to introduce some fault-tolerance
+protocols.
+
+## Failover Tests
+
+We can start multiple producers and consumers, then kill them in different
+orders to test different failover scenarios:
+
+```bash
+./example/producer/producer
+./example/consumer/consumer -tag c1
+./example/producer/producer
+./example/consumer/consumer -tag c2
+./example/consumer/consumer -tag c3
+```
+
+### Example
 
 - run two producers nodes and one consumer
 - kill consumer and immediately kill master node

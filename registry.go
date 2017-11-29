@@ -1,4 +1,4 @@
-package common
+package gorp
 
 import (
 	"fmt"
@@ -12,58 +12,92 @@ import (
 )
 
 const (
-	registerQueue = "register"
-	commandQueue  = "command"
-
-	partitionMasterFailover = 2 * time.Second
+	defaultPrefetchCount   = 16
+	defaultManagerTimeout  = 2 * time.Second
+	defaultConsumerTimeout = 800 * time.Millisecond
 )
 
 type Registry struct {
-	conn    *amqp.Connection
-	ch      *amqp.Channel
-	pool    sync.Map
-	timeout time.Duration
+	conn *amqp.Connection
+	ch   *amqp.Channel
+
+	pool           sync.Map
+	lastExits      *Queue
+	consumerChange time.Time
 
 	isSlave      bool
 	becomeMaster chan bool
 
-	lastExits      *Queue
-	consumerChange time.Time
+	config RegistryConfig
 
-	wg             sync.WaitGroup
-	quitChan       chan struct{}
 	addConsumer    chan string
 	deleteConsumer chan string
 	drain          chan []byte
 	consumerCount  int
+
+	quitConfirmation sync.WaitGroup
+	quitChan         chan struct{}
 }
 
-func NewRegistry(conn *amqp.Connection, timeout time.Duration, drain chan []byte) (*Registry, error) {
+type RegistryConfig struct {
+	RegistryExchange string
+	RegisterTopic    string
+	RegisterQueue    string
+
+	CommandExchange string
+	CommandTopic    string
+	CommandQueue    string
+
+	DatafeedExchange string
+	Topics           []string
+
+	PrefetchCount   int
+	ManagerTimeout  time.Duration
+	ConsumerTimeout time.Duration
+}
+
+func NewRegistry(conn *amqp.Connection, cfg RegistryConfig, drain chan []byte) (*Registry, error) {
 	ch, err := conn.Channel()
 	if err != nil {
 		return nil, err
 	}
 
-	err = SetupRegistryExchange(ch)
+	err = SetupExchange(ch, cfg.RegistryExchange, "fanout")
 	if err != nil {
 		return nil, err
 	}
 
-	err = SetupCommandExchange(ch)
+	err = SetupExchange(ch, cfg.CommandExchange, "fanout")
 	if err != nil {
 		return nil, err
+	}
+
+	if cfg.PrefetchCount == 0 {
+		cfg.PrefetchCount = defaultPrefetchCount
+	}
+
+	if cfg.ManagerTimeout == 0 {
+		cfg.ManagerTimeout = defaultManagerTimeout
+	}
+
+	if cfg.ConsumerTimeout == 0 {
+		cfg.ConsumerTimeout = defaultConsumerTimeout
+	}
+
+	if cfg.PrefetchCount == 0 {
+		cfg.PrefetchCount = 1
 	}
 
 	r := &Registry{
 		conn:           conn,
 		ch:             ch,
-		timeout:        timeout,
 		drain:          drain,
 		becomeMaster:   make(chan bool),
 		quitChan:       make(chan struct{}),
 		addConsumer:    make(chan string, 2),
 		deleteConsumer: make(chan string, 2),
 		lastExits:      NewQueue(3),
+		config:         cfg,
 	}
 	return r, nil
 }
@@ -72,22 +106,22 @@ func NewRegistry(conn *amqp.Connection, timeout time.Duration, drain chan []byte
 // only become once the master node until it drops out. A slave can only be
 // promoted, a master can never be demoted without dropping out.
 func (r *Registry) Run() {
-	t := time.NewTicker(partitionMasterFailover)
+	t := time.NewTicker(r.config.ManagerTimeout)
 
 	var msgs <-chan amqp.Delivery
 	var success bool
 
+	r.quitConfirmation.Add(1)
 loop:
 	for {
-		r.wg.Add(1)
 		select {
 		case <-r.quitChan:
-			r.wg.Done()
+			r.quitConfirmation.Done()
 			return
 		default:
 			msgs, success = r.tryBecomeMaster()
 			if success {
-				r.wg.Done()
+				r.quitConfirmation.Done()
 				break loop
 			}
 			<-t.C
@@ -96,7 +130,7 @@ loop:
 	fmt.Println(" -> assuming partition master")
 
 	go r.runCheckIn(msgs, false)
-	go r.runCheckOut(r.timeout, false)
+	go r.runCheckOut(false)
 	go r.runBalancer(false)
 
 	if r.isSlave {
@@ -132,21 +166,17 @@ func (r *Registry) SafeToSend() bool {
 // Shutdown blocks until all procedures exit
 func (r *Registry) Shutdown() {
 	close(r.quitChan)
-	r.wg.Wait()
+	r.quitConfirmation.Wait()
 }
 
 func (r *Registry) createAndAttach(q, t, e string, persistent, exclusive bool) (<-chan amqp.Delivery, *amqp.Channel, error) {
 	var err error
-	if persistent {
-		_, err = SetupQueue(r.ch, q, true, false, false)
-	} else {
-		_, err = SetupQueue(r.ch, q, false, true, false)
-	}
+	_, err = SetupQueue(r.ch, q, persistent, !persistent, false)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	err = BindQueue(r.ch, q, t, e)
+	err = BindQueueTopic(r.ch, q, t, e)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -155,23 +185,27 @@ func (r *Registry) createAndAttach(q, t, e string, persistent, exclusive bool) (
 	if err != nil {
 		return nil, ch, err
 	}
+	err = Qos(ch, r.config.PrefetchCount)
+	if err != nil {
+		return nil, ch, fmt.Errorf("couldn't set qos %s", err)
+	}
 	msgs, err := Consume(ch, q, "mgnt", exclusive)
 	return msgs, ch, err
 }
 
 func (r *Registry) tryBecomeMaster() (<-chan amqp.Delivery, bool) {
 	msgs, ch, err := r.createAndAttach(
-		registerQueue,
-		registerTopic,
-		registryExchange,
+		r.config.RegisterQueue,
+		r.config.RegisterTopic,
+		r.config.RegistryExchange,
 		false, // persistent
 		true)  // exclusive
 	if err == nil {
-		r.wg.Add(1)
+		r.quitConfirmation.Add(1)
 		go func() {
+			defer ch.Close()
+			defer r.quitConfirmation.Done()
 			<-r.quitChan
-			ch.Close()
-			r.wg.Done()
 		}()
 		return msgs, true
 	}
@@ -185,9 +219,9 @@ func (r *Registry) tryBecomeMaster() (<-chan amqp.Delivery, bool) {
 func (r *Registry) setupSlave() {
 	rand, _ := secureRandom(5)
 	msgs, ch, err := r.createAndAttach(
-		registerQueue+"_slave_"+rand,
-		registerTopic,
-		registryExchange,
+		r.config.RegisterQueue+"_slave_"+rand,
+		r.config.RegisterTopic,
+		r.config.RegistryExchange,
 		false, // persistent
 		true)  // exclusive
 	if err != nil {
@@ -199,20 +233,18 @@ func (r *Registry) setupSlave() {
 	fmt.Println(" -> assuming partition slave")
 
 	go r.runCheckIn(msgs, true)
-	go r.runCheckOut(r.timeout, true)
+	go r.runCheckOut(true)
 	go r.runBalancer(true)
 
-	r.wg.Add(1)
+	r.quitConfirmation.Add(1)
 	go func() {
+		defer ch.Close()
+		defer r.quitConfirmation.Done()
+		// blocking wait
 		select {
 		case <-r.quitChan:
-			ch.Close()
-			r.wg.Done()
 		case <-r.becomeMaster:
-			time.Sleep(partitionMasterFailover)
-			fmt.Println("detaching slave consumer")
-			ch.Close()
-			r.wg.Done()
+			time.Sleep(r.config.ManagerTimeout)
 		}
 	}()
 }
@@ -220,9 +252,9 @@ func (r *Registry) setupSlave() {
 func (r *Registry) runCommandListener() {
 	// durable for rexecution, exclusive for order
 	msgs, ch, err := r.createAndAttach(
-		commandQueue,
-		commandTopic,
-		commandExchange,
+		r.config.CommandQueue,
+		r.config.CommandTopic,
+		r.config.CommandExchange,
 		true, // persistent
 		true) // exclusive
 	if err != nil {
@@ -232,27 +264,36 @@ func (r *Registry) runCommandListener() {
 
 	fmt.Println(" -> command manager running")
 
-	r.wg.Add(1)
+	r.quitConfirmation.Add(1)
 	go func() {
+		defer ch.Close()
+		defer r.quitConfirmation.Done()
+		var retries int
 		for {
 			// one at a time
 			select {
 			case <-r.quitChan:
-				ch.Close()
-				r.wg.Done()
 				return
 			case c := <-msgs:
 				fmt.Printf("command received %s\n", c.Body)
 				err, retry := r.routeCommand(string(c.Body))
 				if err != nil {
+					retries++
 					fmt.Println(err)
-					c.Reject(retry)
+					c.Reject(retry && retries < 2)
+					if retries >= 2 {
+						retries = 0
+					}
 					continue
 				}
 				c.Ack(false)
 			}
 		}
 	}()
+}
+
+func (r *Registry) Command(payload []byte) error {
+	return publish(r.ch, r.config.CommandExchange, r.config.CommandTopic, payload, amqp.Persistent)
 }
 
 func (r *Registry) routeCommand(cmd string) (error, bool) {
@@ -274,7 +315,8 @@ func (r *Registry) routeCommand(cmd string) (error, bool) {
 			return err, false
 		}
 		if n != r.consumerCount {
-			err := Command(r.ch, commandTopic, fmt.Sprintf("balance:%s:%d", consumerTag, r.consumerCount))
+			payload := []byte(fmt.Sprintf("balance:%s:%d", consumerTag, r.consumerCount))
+			err := r.Command(payload)
 			return fmt.Errorf("retry, consumer count not yet adjusted"), err != nil
 		}
 		return r.balanceBindings(n), false
@@ -285,9 +327,13 @@ func (r *Registry) routeCommand(cmd string) (error, bool) {
 }
 
 func (r *Registry) runBalancer(isSlave bool) {
+	r.quitConfirmation.Add(1)
+	defer r.quitConfirmation.Done()
 	for {
 		var k, action string
 		select {
+		case <-r.quitChan:
+			return
 		case k = <-r.addConsumer:
 			r.consumerCount++
 			action = "add"
@@ -299,7 +345,6 @@ func (r *Registry) runBalancer(isSlave bool) {
 			fmt.Println(" -> removing consumer from pool:", k)
 		case <-r.becomeMaster:
 			if isSlave {
-				fmt.Println("slave exiting balancer")
 				return
 			}
 		}
@@ -311,13 +356,14 @@ func (r *Registry) runBalancer(isSlave bool) {
 			continue
 		}
 
-		err := Command(r.ch, commandTopic, fmt.Sprintf("balance:%s:%d", k, r.consumerCount))
+		payload := []byte(fmt.Sprintf("balance:%s:%d", k, r.consumerCount))
+		err := r.Command(payload)
 		if err != nil {
 			fmt.Println(" [!!] failed to balance bindings for timed out node:", k, err)
 		}
 		// post rebalancing
 		if action == "delete" {
-			err = Command(r.ch, commandTopic, "retire:"+k)
+			err = r.Command([]byte("retire:" + k))
 			if err != nil {
 				fmt.Println(" [!!] failed to retire node:", k, err)
 			}
@@ -326,13 +372,16 @@ func (r *Registry) runBalancer(isSlave bool) {
 	}
 }
 
-func (r *Registry) runCheckOut(timeout time.Duration, isSlave bool) {
-	t := time.NewTicker(timeout / 2)
+func (r *Registry) runCheckOut(isSlave bool) {
+	t := time.NewTicker(r.config.ConsumerTimeout / 2)
+	r.quitConfirmation.Add(1)
+	defer r.quitConfirmation.Done()
 	for {
 		select {
+		case <-r.quitChan:
+			return
 		case <-r.becomeMaster:
 			if isSlave {
-				fmt.Println("slave exiting check-outs")
 				return
 			}
 		case <-t.C:
@@ -340,7 +389,7 @@ func (r *Registry) runCheckOut(timeout time.Duration, isSlave bool) {
 				k := ki.(string)
 				v := vi.(int64)
 				lastCheckIn := time.Since(time.Unix(0, v))
-				if lastCheckIn > timeout {
+				if lastCheckIn > r.config.ConsumerTimeout {
 					r.pool.Delete(k)
 					r.deleteConsumer <- k
 				}
@@ -351,11 +400,14 @@ func (r *Registry) runCheckOut(timeout time.Duration, isSlave bool) {
 }
 
 func (r *Registry) runCheckIn(msgs <-chan amqp.Delivery, isSlave bool) {
+	r.quitConfirmation.Add(1)
+	defer r.quitConfirmation.Done()
 	for {
 		select {
+		case <-r.quitChan:
+			return
 		case <-r.becomeMaster:
 			if isSlave {
-				fmt.Println("slave exiting check-ins")
 				return
 			}
 		case d := <-msgs:
@@ -374,8 +426,11 @@ func (r *Registry) runCheckIn(msgs <-chan amqp.Delivery, isSlave bool) {
 }
 
 func (r *Registry) balanceBindings(n int) error {
+	//if n == 0 {
+	//	return fmt.Errorf("no consumers")
+	//}
 	fmt.Println(" -> balancing for", n, "consumers")
-	alphabet := len(RouteKeys)
+	alphabet := len(r.config.Topics)
 	chunks := int(math.Ceil(float64(alphabet) / float64(n)))
 	chunki := 0
 
@@ -389,7 +444,7 @@ func (r *Registry) balanceBindings(n int) error {
 		s := chunki * chunks
 		e := (chunki + 1) * chunks
 		for i := 0; i < alphabet; i++ {
-			route := string(RouteKeys[i])
+			route := r.config.Topics[i]
 			if i >= s && i < e {
 				bindings = append(bindings, binding{k: k, route: route, t: "bind"})
 			} else {
@@ -406,13 +461,13 @@ func (r *Registry) balanceBindings(n int) error {
 		var err error
 		if b.t == "bind" {
 			fmt.Println("binding", b.k, "to", b.route)
-			err = BindQueueTopic(r.ch, b.k, b.route)
+			err = BindQueueTopic(r.ch, b.k, b.route, r.config.DatafeedExchange)
 		} else {
 			fmt.Println("unbinding", b.k, "from", b.route)
-			err = UnbindQueueTopic(r.ch, b.k, b.route)
+			err = UnbindQueueTopic(r.ch, b.k, b.route, r.config.DatafeedExchange)
 		}
 		if err != nil {
-			fmt.Println(err)
+			return err
 		}
 	}
 
@@ -420,13 +475,21 @@ func (r *Registry) balanceBindings(n int) error {
 }
 
 func (r *Registry) retireQueue(k string) error {
+	// this one may break, get a new channel on every try
+	ch, err := r.conn.Channel()
+	if err != nil {
+		// if this fails we're screwed anyways
+		return fmt.Errorf("couldn't open channel %s", err)
+	}
+	defer ch.Close()
+
 	//  1 unbind all
-	err := r.unbindAll(k)
+	err = r.unbindAll(k)
 	if err != nil {
 		return err
 	}
 	//  2 attach and drain residuals
-	q, err := r.ch.QueueInspect(k)
+	q, err := ch.QueueInspect(k)
 	if err != nil {
 		return err
 	}
@@ -440,15 +503,15 @@ func (r *Registry) retireQueue(k string) error {
 	//  3 delete queue
 	fmt.Println(" -> cleanup deleting queue", k)
 	// agressive delete here, may need to retry above in production setup
-	_, err = r.ch.QueueDelete(k, false, false, true)
+	_, err = ch.QueueDelete(k, false, false, true)
 	return err
 }
 
 func (r *Registry) unbindAll(k string) error {
-	for i := 0; i < len(RouteKeys); i++ {
-		route := string(RouteKeys[i])
+	for i := 0; i < len(r.config.Topics); i++ {
+		route := r.config.Topics[i]
 		fmt.Println(" -> cleanup unbinding", k, "from", route)
-		err := UnbindQueueTopic(r.ch, k, route)
+		err := UnbindQueueTopic(r.ch, k, route, r.config.DatafeedExchange)
 		if err != nil {
 			return fmt.Errorf("unbinding %s from %s failed with %s", k, route, err)
 		}
@@ -460,6 +523,10 @@ func (r *Registry) drainQueue(k string, m int) error {
 	ch, err := r.conn.Channel()
 	if err != nil {
 		return fmt.Errorf("couldn't open channel %s", err)
+	}
+	err = Qos(ch, 1)
+	if err != nil {
+		return fmt.Errorf("couldn't set qos %s", err)
 	}
 	msgs, err := Consume(ch, k, "mgnt", true)
 	if err != nil {
@@ -505,6 +572,7 @@ func (r *Registry) checkRecentExits() error {
 			}
 			configChange = true
 		}
+		ch.Close()
 	}
 	if configChange {
 		fmt.Println(" XX rebalancing after config change ")

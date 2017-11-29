@@ -3,24 +3,19 @@ SHELL := /bin/bash
 
 .PHONY: producer consumer
 default: all
-
 all: build
-
-get:
-	cd producer && go get
-	cd consumer && go get
 
 run: build
 	@echo " -- starting consumer 1"
-	@./consumer/consumer -tag c1 &
+	@./example/consumer/consumer -tag c1 &
 	@echo " -- starting producer"
-	@./producer/producer &
+	@./example/producer/producer &
 	@sleep 3
 	@echo " -- starting consumer 2"
-	@./consumer/consumer -tag c2 &
+	@./example/consumer/consumer -tag c2 &
 	@sleep 3
 	@echo " -- starting consumer 3"
-	@./consumer/consumer -tag c3 &
+	@./example/consumer/consumer -tag c3 &
 	@sleep 3
 	@echo " -- shutting down example"
 	@killall producer
@@ -29,10 +24,10 @@ run: build
 build: producer consumer
 
 producer:
-	$(MAKE) -C $@
+	$(MAKE) -C ./example/$@
 
 consumer:
-	$(MAKE) -C $@
+	$(MAKE) -C ./example/$@
 
 rabbitmq:
 	docker run -d \

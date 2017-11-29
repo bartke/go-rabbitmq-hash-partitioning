@@ -10,11 +10,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bartke/go-rabbitmq-hash-partitioning/common"
+	gorp "github.com/bartke/go-rabbitmq-hash-partitioning"
 	"github.com/streadway/amqp"
 )
 
 const (
+	hostname = "localhost"
+	username = "guest"
+	password = "guest"
+	scheme   = "amqp"
+	port     = 5672
+
 	heartbeatFrequency = 200 * time.Millisecond
 )
 
@@ -33,7 +39,7 @@ func main() {
 	exitChan := make(chan struct{})
 	var wg sync.WaitGroup
 
-	conn, err := amqp.Dial(common.ConnectionString())
+	conn, err := amqp.Dial(fmt.Sprintf("%s://%s:%s@%s:%d/", scheme, username, password, hostname, port))
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer conn.Close()
 
@@ -42,15 +48,22 @@ func main() {
 	defer ch.Close()
 
 	// ensure the registry exists for heartbeats
-	err = common.SetupRegistryExchange(ch)
-	failOnError(err, "Failed to declare a exchange")
+	cfg := gorp.RegistrarConfig{
+		Tag:                tag,
+		RegistryExchange:   "registry",
+		RegisterTopic:      "register",
+		HeartbeatFrequency: heartbeatFrequency,
+	}
+
+	registrar, err := gorp.NewRegistrar(conn, cfg)
+	failOnError(err, "Failed to create registrar")
 
 	// setup queue without binding, durable, non-auto delete, non-exclusive
-	_, err = common.SetupQueue(ch, tag, true, false, false)
+	_, err = gorp.SetupQueue(ch, tag, true, false, false)
 	failOnError(err, "Failed to declare queue")
 
 	// start exclusive consumer
-	msgs, err := common.Consume(ch, tag, "comsumer-"+tag, true)
+	msgs, err := gorp.Consume(ch, tag, "comsumer-"+tag, true)
 	failOnError(err, "Failed to register a consumer")
 
 	// register and keep alive
@@ -74,41 +87,24 @@ func main() {
 
 	// start pinging after we're listening
 
-	wg.Add(1)
-	go heartbeat(ch, tag, &wg, exitChan)
+	go registrar.Run()
 
 	fmt.Printf(" [**] %s running\n", tag)
 	// blocking wait for SIGTERM
 	waitForSigterm()
 
 	fmt.Printf(" [**] %s trying to shutdown..\n", tag)
-	// after SIGTERM trigger exit and wait for all procedures to finish
+	registrar.Shutdown()
 	close(exitChan)
 	wg.Wait()
-	// detach
 	ch.Close()
-	fmt.Printf(" [**] %s graceful shutdown\n", tag)
+	fmt.Printf(" [**] %s done\n", tag)
 }
 
 func failOnError(err error, msg string) {
 	if err != nil {
 		log.Println("%s: %s\n", msg, err)
 		os.Exit(1)
-	}
-}
-
-func heartbeat(ch *amqp.Channel, consumer string, wg *sync.WaitGroup, exitChan chan struct{}) {
-	t := time.NewTicker(heartbeatFrequency)
-	for {
-		select {
-		case <-t.C:
-			err := common.Heartbeat(ch, consumer)
-			failOnError(err, "Failed to publish a message")
-		case <-exitChan:
-			fmt.Println("shutting down heartbeats")
-			wg.Done()
-			return
-		}
 	}
 }
 

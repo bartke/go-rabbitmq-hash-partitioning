@@ -1,4 +1,4 @@
-package common
+package gorp
 
 type Queue struct {
 	fifo      []string
@@ -14,14 +14,16 @@ func NewQueue(maxLength int) *Queue {
 func (q *Queue) Push(s string) {
 	q.fifo = append(q.fifo, s)
 	if q.maxLength > 0 && q.Len() > q.maxLength {
-		// discard overflow
-		q.Pop()
+		q.Pop() // discard overflow
 	}
 }
 
 func (q *Queue) Pop() (s string) {
-	s = (q.fifo)[0]
-	q.fifo = (q.fifo)[1:]
+	// demo
+	if len(q.fifo) > 0 {
+		s = (q.fifo)[0]
+		q.fifo = (q.fifo)[1:]
+	}
 	return
 }
 
